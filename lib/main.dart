@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
@@ -198,6 +199,7 @@ class _LearningScreenState extends State<LearningScreen> {
   }
 
   Future<void> _loadWords() async {
+      await DBHelper.instance.updateOutdatedWords();
     List<Word> words = await DBHelper.instance.getPendingWords();
     setState(() {
       _words = words;
@@ -207,6 +209,8 @@ class _LearningScreenState extends State<LearningScreen> {
       _speakCurrentWord();
     }
   }
+
+  
 
   Future<void> _speakCurrentWord() async {
     if (_words.isNotEmpty && _currentIndex < _words.length) {
@@ -230,6 +234,7 @@ class _LearningScreenState extends State<LearningScreen> {
     } else {
       currentWord.score -= 1;
     }
+   currentWord.lastRemembered = DateTime.now().millisecondsSinceEpoch;
 
     await DBHelper.instance.updateWord(currentWord);
 
@@ -238,6 +243,8 @@ class _LearningScreenState extends State<LearningScreen> {
       _goToNextWord();
     });
   }
+
+  
 
   // Function for revealing translation via tap (no score update)
   void _revealTranslation(bool onlyShow) {
@@ -412,12 +419,14 @@ class Word {
   String word;
   String translation;
   int score;
+  int? lastRemembered;
 
   Word({
     this.id,
     required this.word,
     required this.translation,
     required this.score,
+    this.lastRemembered,
   });
 
   factory Word.fromMap(Map<String, dynamic> json) => Word(
@@ -425,6 +434,7 @@ class Word {
         word: json['word'],
         translation: json['translation'],
         score: json['score'],
+       lastRemembered: json['last_remembered'],
       );
 
   Map<String, dynamic> toMap() {
@@ -432,6 +442,7 @@ class Word {
       'word': word,
       'translation': translation,
       'score': score,
+      'last_remembered': lastRemembered,
     };
     if (id != null) {
       map['id'] = id;
@@ -455,8 +466,19 @@ class DBHelper {
   Future<Database> _initDB(String filePath) async {
     Directory documentsDirectory = await getApplicationDocumentsDirectory();
     String path = join(documentsDirectory.path, filePath);
-    return await openDatabase(path, version: 1, onCreate: _createDB);
+    return await openDatabase(
+    path,
+    version: 2, // Updated version
+    onCreate: _createDB,
+    onUpgrade: _upgradeDB,
+  );
   }
+  Future _upgradeDB(Database db, int oldVersion, int newVersion) async {
+  if (oldVersion < 2) {
+    // Add the new column 'last_remembered'
+    await db.execute('ALTER TABLE words ADD COLUMN last_remembered INTEGER;');
+  }
+}
 
   Future _createDB(Database db, int version) async {
     await db.execute('''
@@ -464,7 +486,8 @@ class DBHelper {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         word TEXT NOT NULL,
         translation TEXT NOT NULL,
-        score INTEGER NOT NULL
+        score INTEGER NOT NULL,
+        last_remembered INTEGER 
       )
     ''');
   }
@@ -497,6 +520,30 @@ class DBHelper {
     final db = await instance.database;
     return await db.delete('words', where: 'id = ?', whereArgs: [id]);
   }
+
+  Future<void> updateOutdatedWords() async {
+  final db = await instance.database;
+  // Get all words regardless of score
+  final result = await db.query('words');
+  List<Word> allWords = result.map((json) => Word.fromMap(json)).toList();
+  
+  int now = DateTime.now().millisecondsSinceEpoch;
+  int thirtyDaysInMillis = 30 * 24 * 60 * 60 * 1000;
+
+  for (Word word in allWords) {
+    // Check if lastRemembered exists and is older than 30 days
+    if (word.lastRemembered != null && (now - word.lastRemembered!) > thirtyDaysInMillis) {
+      // Decrement score (ensure it doesn't drop below 0)
+      if (word.score > 0) {
+        word.score -= 1;
+        // Optionally update lastRemembered to now if you only want to penalize once
+        // word.lastRemembered = now;
+        await updateWord(word);
+      }
+    }
+  }
+}
+
 }
 
 
@@ -610,6 +657,9 @@ class _EditWordsScreenState extends State<EditWordsScreen> {
                     children: [
                       Text('Translation: ${word.translation}'),
                       Text('Score: ${word.score}'),
+                       Text(
+        'Last review: ${word.lastRemembered != null ? DateFormat('yyyy-MM-dd').format(DateTime.fromMillisecondsSinceEpoch(word.lastRemembered!)) : 'Never'}',
+      ),
                     ],
                   ),
                   trailing: IconButton(
